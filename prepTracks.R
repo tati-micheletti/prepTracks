@@ -1,6 +1,6 @@
 defineModule(sim, list(
   name = "prepTracks",
-  description = "",
+  description = "A targets pipeline to prepare tracks derived from location data",
   keywords = "",
   authors = c(person("Julie", "Tuner", email = "", role = c("aut", "cre")),
               person("Rory", "McInnes", email = "", role = c("aut", "cre"))),
@@ -39,7 +39,12 @@ defineModule(sim, list(
   ),
   outputObjects = bindrows(
     #createsOutput("objectName", "objectClass", "output object description", ...),
-    createsOutput(objectName = "extrctedDat", objectClass = NA, desc = NA)
+    createsOutput(objectName = "tracks", objectClass = "data.table", 
+                  desc = "Prepared tracks with random steps"),
+    createsOutput(objectName = "distparams", objectClass = "list",
+                  desc = "A list of parameters from a fitted distribution"),
+    createsOutput(objectName = "buffer", objectClass = "numeric", 
+                  desc = "A buffer value for the step length")
     
   )
 ))
@@ -61,17 +66,19 @@ doEvent.prepTracks = function(sim, eventTime, eventType) {
 }
 
 Init <- function(sim) {
-  #on the fly attempt
-  # Write the _targets.R script on the fly
+  # prepped locations for pipeline
   sim_locations <- sim$caribouLoc
+  
+  # set the paths for the targets pipeline
   module_name <- currentModule(sim)
   module_root_path <- modulePath(sim, module = module_name)
-  module_r_path <- file.path(module_root_path, "R")
+  store_path <- file.path(module_root_path, module_name, "_targets_store")
+  script_path <- file.path(store_path, "_targets.R")
+  # R folder with custom functions 
+  module_r_path <- file.path(module_root_path, module_name, "R")
   
-  script_path <- file.path(tempdir(), "_targets.R")
-  
-  # Write _targets.R manually so it has a literal path
-  script_text <- glue("
+  # Write the _targets.R script on the fly
+  script_text <- glue('
   # --- Code to run BEFORE the pipeline ---
     
     # 1. Load the targets package
@@ -86,37 +93,37 @@ Init <- function(sim) {
     library(glmmTMB)
     library(distanceto)
     library(dtplyr)
-    print('Checking sim_locations exists:')
-    print(exists('sim_locations'))
+    print("Checking sim_locations exists:")
+    print(exists("sim_locations"))
 
 
     # Source the module functions explicitly
-    tar_source(files = '{module_r_path}')
+    tar_source(files = "{module_r_path}")
     
-    #set envir so targets can access sim_locations
+    # Set envir so targets can access sim_locations
     tar_option_set(
-      packages = c('dplyr', 'ggplot2', 'tarchetypes', 'amt', 'data.table',
-                   'terra', 'sf', 'sp', 'glmmTMB', 'distanceto'),
-      format = 'qs',
+      packages = c("dplyr", "ggplot2", "tarchetypes", "amt", "data.table",
+                   "terra", "sf", "sp", "glmmTMB", "distanceto"),
+      format = "qs",
       envir = environment()
     )
     
     set.seed(37)
     
-    id <- 'id'
-    datetime <- 'datetime'
+    id <- "id"
+    datetime <- "datetime"
     longlat = FALSE
-    #not actually longitude and latitude, just don't want to change code
-    long <- 'x'
-    lat <- 'y'
+    # not actually longitude and latitude, just don\'t want to change code
+    long <- "x"
+    lat <- "y"
     crs <- st_crs(3978)$wkt
     
     # minimum year we want to pull data for
     minyr <- 2010
-    maxyr <- 2021
+    maxyr <- 2022
     
     # Split by: within which column or set of columns (eg. c(id, yr))
-    #  do we want to split our analysis?
+    # do we want to split our analysis?
     splitBy <- id
     interval <- 5 # to round by 5 year intervals
     sl.interval <- 50 # to round by 50m intervals
@@ -143,103 +150,102 @@ Init <- function(sim) {
       # subsample data to that greater than minimum year
       tar_target(
         subdt,
-        mkunique[lubridate::year(datetime)>= minyr]
+        mkunique[lubridate::year(datetime) >= minyr]
       ),
       
       # Set up split -- these are our iteration units
       tar_target(
         splits,
-        base::split(subdt, subdt[[splitBy]])
+        subdt[, tar_group := .GRP, by = splitBy],
+        iteration = "group"
       ),
       
       tar_target(
         splitsnames,
         unique(subdt[, .(n_points = .N), by = splitBy])
       )
-
     )
-    
-    
-    
     # Targets: tracks -----------------------------------------------------------------------
-    # Make tracks. Note from here on, when we want to iterate use pattern = map(x)
-    #  where x is the upstream target name
     targets_tracks <- c(
       tar_target(
         tracks,
-        make_track(splits, long, lat, datetime, crs = crs, all_cols = T),
+        make_track(splits, long, lat, datetime, crs = crs, all_cols = TRUE),
         pattern = map(splits)
       ),
-      
-      # Resample sampling rate, filtering out extra long steps
       tar_target(
         resamples,
         resample_tracks(tracks, rate, tolerance, probsfilter = 0.95),
         pattern = map(tracks)
       ),
-      # Check step distributions
-      #  iteration = 'list' used for returning a list of ggplots,
-      #  instead of the usual combination with vctrs::vec_c()
+      
       tar_target(
         distributions,
-        ggplot(resamples, aes(sl_)) + geom_density(alpha = 0.4)#,
-        # pattern = map(resamples),
-        # iteration = 'list'
+        ggplot(resamples, aes(sl_)) + geom_density(alpha = 0.4)
       ),
-      # create random steps and extract covariates
-      # after `distributions` target
       
-      # calc global sl distribution
       tar_target(
         sl_distr,
-        fit_distr(resamples$sl_, 'gamma')
+        fit_distr(resamples$sl_, "gamma")
       ),
       
-      # calc global ta distribution
       tar_target(
         ta_distr,
-        fit_distr(resamples$ta_, 'vonmises')
+        fit_distr(resamples$ta_, "vonmises")
       ),
-      
-      # create random steps and extract covariates
       tar_target(
         randsteps,
-        make_random_steps(resamples, n_rand = 10, sl_distr, ta_distr),
+        make_random_steps(resamples, sl_distr, ta_distr),
         pattern = map(resamples)
       ),
       
-      # Distribution parameters
       tar_target(
         distparams,
         calc_distribution_parameters(randsteps),
         pattern = map(randsteps)
       ), 
       
-      # make a data.table so easier to manipulate
       tar_target(
         dattab,
         make_data_table(randsteps)
       ),
       
-      # add a year column
       tar_target(
         addyear,
-        dattab[,`:=`(year=lubridate::year(t2_), 
-                     int.year=plyr::round_any(lubridate::year(t2_), interval, floor))]
+        dattab[, `:=`(
+          year = lubridate::year(t2_),
+          int.year = plyr::round_any(lubridate::year(t2_), interval, floor)
+        )]
+      ),
+      
+      tar_target(
+        buffer,
+        plyr::round_any(median(addyear$sl_, na.rm = T), sl.interval, floor)
       )
     )
-    c(targets_prep, targets_tracks)")
+    c(targets_prep, targets_tracks)
+')
   
+  # write the dynamic targets script to the store_path
+  if (!dir.exists(store_path)) {
+    dir.create(store_path, recursive = TRUE)
+  }
   writeLines(script_text, script_path)
   
-  # Run the pipeline reproducibly from that script
-  tar_make(script = script_path, callr_function = NULL)
+  message("Targets script written to: ", script_path)
+  message("Module R path: ", module_r_path)
+  message("Store path: ", store_path)
   
-  # Read results back into the simList
-  #need to debug the pipeline functions
+  # Run the pipeline reproducibly
+  tar_make(script = script_path, callr_function = NULL, store = targets::tar_config_get("store"))
   
-  # Clean up targets files, if desired
-  #tar_destroy()
+  # Load targets objects
+  tar_load(addyear)
+  tar_load(distparams)
+  tar_load(buffer)
+  #save targets objects into the simlist
+  sim$tracks <- addyear
+  sim$distparams <- distparams
+  sim$buffer <- buffer
   
   return(sim)
 }

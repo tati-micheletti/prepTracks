@@ -5,7 +5,8 @@ prepareTracks <- function(crs,
                           maxyr,
                           rate,
                           tolerance,
-                          locations){
+                          locations,
+                          probsfilter){
   
   id <- "id"
   datetime <- "datetime"
@@ -29,7 +30,7 @@ prepareTracks <- function(crs,
     make_track(s, long, lat, datetime, crs = crs, all_cols = TRUE)
   })
   resamples <- lapply(tracks, function(t) {
-    resample_tracks(t, rate, tolerance, probsfilter = 0.95, longlat)
+    resample_tracks(t, rate, tolerance, probsfilter = probsfilter, longlat)
   })
   resamples_combined <- data.table::rbindlist(resamples, idcol = "original_list_id")
   distributions <- ggplot(resamples_combined, aes(sl_)) + geom_density(alpha = 0.4)

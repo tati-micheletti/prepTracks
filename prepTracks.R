@@ -45,7 +45,9 @@ defineModule(sim, list(
     defineParameter("rate", "numeric", hours(13), NA, NA,
                     "ADD DESCRIPTION"),
     defineParameter("tolerance", "numeric", minutes(150), NA, NA,
-                    "ADD DESCRIPTION")
+                    "ADD DESCRIPTION"),
+    defineParameter("probsfilter", "numeric", 0.95, NA, NA,
+                    "Probability filter for anormal steps")
   ),
   inputObjects = bindrows(
     expectsInput(objectName = "caribouLoc", objectClass = "data.table",
@@ -83,7 +85,8 @@ doEvent.prepTracks = function(sim, eventTime, eventType) {
                                    maxyr = P(sim)$maxyr,
                                    rate = P(sim)$rate,
                                    tolerance = P(sim)$tolerance,
-                                   locations = sim$caribouLoc)
+                                   locations = sim$caribouLoc,
+                                   probsfilter = P(sim)$probsfilter)
       
       sim$tracks <- tracksReady$tracks
       sim$distparams <- tracksReady$distparams
